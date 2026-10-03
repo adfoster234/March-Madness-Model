@@ -1,0 +1,199 @@
+---
+title: "MarchPredictor"
+author: "Adam Foster"
+date: "2026-03-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(hoopR) 
+library(dplyr)
+library(ggplot2)
+
+mbb_pbp <- hoopR::load_mbb_pbp()          # play-by-play
+mbb_team_box <- hoopR::load_mbb_team_box()
+mbb_player_box <- hoopR::load_mbb_player_box()
+mbb_sched <- hoopR::load_mbb_schedule()
+```
+
+
+```{r, echo=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+#computing effciency predictors
+team_games <- mbb_team_box %>%
+  mutate(
+    poss =
+      field_goals_attempted -
+      offensive_rebounds +
+      turnovers +
+      0.475 * free_throws_attempted,
+
+    off_eff = 100 * team_score / poss,
+    def_eff = 100 * opponent_team_score / poss,
+
+    lead_percentage = ifelse(is.na(lead_percentage), 0.5, lead_percentage),
+
+    tempo = poss,
+
+    ast_to_ratio = ifelse(turnovers == 0, assists, assists / turnovers),
+
+    fast_break_points = as.numeric(fast_break_points)
+  )
+
+#Get opponent rebounds
+opponent_rebounds <- mbb_team_box %>%
+  select(game_id, team_id, total_rebounds) %>%
+  rename(
+    opponent_team_id = team_id,
+    opponent_rebounds = total_rebounds
+  )
+
+team_games <- team_games %>%
+  left_join(
+    opponent_rebounds,
+    by = c("game_id", "opponent_team_id")
+  ) %>%
+  mutate(
+    rebound_margin = total_rebounds - opponent_rebounds
+  )
+
+#finding season averages
+team_season <- team_games %>%
+  group_by(season, team_id, team_display_name) %>%
+  summarise(
+    off_eff = mean(off_eff, na.rm = TRUE),
+    def_eff = mean(def_eff, na.rm = TRUE),
+
+    lead_percentage = mean(as.numeric(lead_percentage), na.rm = TRUE) / 100,
+
+    tempo = mean(tempo, na.rm = TRUE),
+    ast_to_ratio = mean(ast_to_ratio, na.rm = TRUE),
+    rebound_margin = mean(rebound_margin, na.rm = TRUE),
+
+    fast_break_points = mean(fast_break_points, na.rm = TRUE),
+
+    .groups = "drop"
+  ) %>%
+  mutate(
+    net_eff = off_eff - def_eff
+  )
+
+#SOS
+team_ratings <- team_season %>%
+  select(season, team_id, net_eff)
+
+games_with_opp <- team_games %>%
+  left_join(
+    team_ratings,
+    by = c("season", "opponent_team_id" = "team_id")
+  ) %>%
+  rename(opponent_net_eff = net_eff)
+
+team_sos <- games_with_opp %>%
+  group_by(season, team_id) %>%
+  summarise(
+    sos = mean(opponent_net_eff, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+team_season <- team_season %>%
+  left_join(team_sos, by = c("season","team_id"))
+
+
+
+#model
+model_data <- team_season %>%
+  select(
+    season,
+    team_id,
+    team_display_name,
+    net_eff,
+    sos,
+    lead_percentage,
+    tempo,
+    ast_to_ratio,
+    rebound_margin,
+    fast_break_points
+  )
+#CLEANING
+model_data <- model_data %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.infinite(.), NA, .)))
+
+model_data <- model_data %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+#STANDARDIZE METRICS
+model_scaled <- model_data %>%
+  mutate(
+    net_eff_z = as.numeric(scale(net_eff)),
+    sos_z = as.numeric(scale(sos)),
+    lead_z = as.numeric(scale(lead_percentage)),
+    tempo_z = as.numeric(scale(tempo)),
+    ast_to_z = as.numeric(scale(ast_to_ratio)),
+    reb_z = as.numeric(scale(rebound_margin)),
+    fast_break_z = as.numeric(scale(fast_break_points)))
+
+#CREATE RANKING WEIGHTED
+model_scaled <- model_scaled %>%
+  mutate(
+    rating =
+      0.3 * net_eff_z +
+      0.3 * sos_z +
+      0.15 * lead_z +
+      0.10 * tempo_z +
+      0.05 * ast_to_z +
+      0.05 * reb_z +
+      0.05 * fast_break_z)
+  
+team_rankings <- model_scaled %>%
+  arrange(desc(rating)) %>%
+  mutate(rank = row_number())
+
+#TOURNEY TEAMS
+  tournament_teams <- c("Duke Blue Devils", "Arizona Wildcats", "Michigan Wolverines", "Florida Gators", "Purdue Boilermakers", "Houston Cougars", "UConn Huskies", "Iowa State Cyclones", "Illinois Fighting Illini", "Virginia Cavaliers", "Michigan State Spartans", "Vanderbilt Commodores", "Kansas Jayhawks", "Nebraska Cornhuskers", "Alabama Crimson Tide", "Gonzaga Bulldogs", "Arkansas Razorbacks", "Texas Tech Red Raiders", "St. John's Red Storm", "Wisconsin Badgers", "Tennessee Volunteers", "Louisville Cardinals", "BYU Cougars", "North Carolina Tar Heels", "Miami Hurricanes", "Utah State Aggies", "Saint Mary's Gaels", "Siena Saints", "Ohio State Buckeyes", "TCU Horned Frogs", "Northern Iowa Panthers", "California Baptist Lancers", "South Florida Bulls", "North Dakota State Bison", "UCLA Bruins", "UCF Knights", "Furman Paladins", "Clemson Tigers", "Iowa Hawkeyes", "McNeese Cowboys", "Troy Trojans", "VCU Rams", "Pennsylvania Quakers", "Texas A&M Aggies", "Idaho Vandals", "Long Island University Sharks", "Villanova Wildcats", "High Point Panthers", "Hawai'i Rainbow Warriors", "Texas Longhorns", "NC State Wolfpack", "Kennesaw State Owls", "Missouri Tigers", "Queens University Royals", "Georgia Bulldogs", "Saint Louis Billikens", "Akron Zips", "Hofstra Pride", "Wright State Raiders", "Kentucky Wildcats", "Santa Clara Broncos", "Tennessee State Tigers", "Miami (OH) RedHawks", "SMU Mustangs", "Lehigh Mountain Hawks", "Prairie View A&M Panthers", "UMBC Retrievers", "Howard Bison")
+  
+#RANKING TOURNEY TEAMS
+  
+tournament_rankings <- team_rankings %>%
+  filter(team_display_name %in% tournament_teams) %>%
+  arrange(desc(rating)) %>%
+  mutate(tourney_rank = row_number())
+
+tournament_rankings %>%
+  select(tourney_rank, team_display_name, rating)
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.width=11, fig.height=8.5}
+tournament_rankings <- tournament_rankings %>%
+  mutate(group = ceiling(tourney_rank / 14))
+
+
+ggplot(tournament_rankings,
+       aes(x = reorder(team_display_name, rating), y = rating)) +
+
+  geom_col(aes(fill = rating)) +
+scale_fill_gradient(low = "#9ecae1", high = "#08306b") +
+
+  coord_flip() +
+
+  facet_wrap(~group, scales = "free_y", ncol = 3) +
+
+  labs(
+  title = "March Madness Teams Ranked\nby My Predictive Data Model",
+  subtitle = "Composite rating based on NET, SOS, Tempo, Rebounding, and Ast/TO",
+  x = "",
+  y = "Model Rating"
+) +
+
+theme_minimal(base_size = 12) +
+
+theme(
+  plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+  plot.subtitle = element_text(size = 12, hjust = 0.5),
+  plot.margin = margin(t = 25, r = 10, b = 10, l = 10),
+  axis.text.y = element_text(size = 7),
+  strip.text = element_text(size = 12)
+)
+```
